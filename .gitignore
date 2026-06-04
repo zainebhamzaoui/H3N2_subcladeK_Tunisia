@@ -1,0 +1,35 @@
+# Raw sequence files
+*.fasta
+*.fa
+*.fas
+*.fna
+*.fastq
+*.fq
+*.gz
+
+# Alignment files
+alignment/
+raw_fasta/
+raw_data/
+data/
+
+# Large result files
+*.tree
+*.treefile
+*.json
+*.nwk
+
+# Python temporary files
+__pycache__/
+*.pyc
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment
+.env
+.venv/
