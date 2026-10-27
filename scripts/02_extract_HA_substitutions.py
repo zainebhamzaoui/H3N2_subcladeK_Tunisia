@@ -1,180 +1,97 @@
 #!/usr/bin/env python3
+"""Count substitutions in an explicitly curated Tunisian subclade K set.
 
+Python 3 standard library only. Inputs: Nextclade TSV and a text file containing
+the retained K isolate accessions (one per line or comma-separated). This script
+does not infer which passage record to retain: curate that list beforehand.
+Region labels are preserved; no conversion to HA0 coordinates is performed.
 """
-Extract HA amino-acid substitutions from Nextclade output.
-
-Input:
-    results/nextclade_HA_Tunisia_plus_global.tsv
-
-Outputs:
-    results/HA_Tunisia_mutation_counts.csv
-    results/HA_Tunisia_mutation_heatmap_matrix.csv
-    results/HA_Tunisia_main_mutations_min4.csv
-
-Notes:
-    Raw GISAID FASTA files are not redistributed in this repository.
-"""
-
-import os
+import argparse
+import collections
+import csv
+import hashlib
+import json
 import re
-import pandas as pd
+from pathlib import Path
 
+AA = re.compile(r'^(SigPep|HA1|HA2):([A-Z])(\d+)([A-Z])$')
+REGIONS = {'SigPep': 0, 'HA1': 1, 'HA2': 2}
 
-NEXTCLADE_FILE = "results/nextclade_HA_Tunisia_plus_global.tsv"
-OUT_COUNTS = "results/HA_Tunisia_mutation_counts.csv"
-OUT_MATRIX = "results/HA_Tunisia_mutation_heatmap_matrix.csv"
-OUT_MAIN = "results/HA_Tunisia_main_mutations_min4.csv"
+def parse_mutation(value):
+    match = AA.fullmatch(value)
+    if not match:
+        raise ValueError(f'Unexpected amino-acid substitution: {value}')
+    return match[1], int(match[3])
 
-os.makedirs("results", exist_ok=True)
+def run(nextclade, accessions, outdir):
+    raw_ids = re.split(r'[\s,;]+', accessions.read_text().strip())
+    if not raw_ids or any(not re.fullmatch(r'EPI_ISL_\d+', x) for x in raw_ids):
+        raise ValueError('Accession file must contain EPI_ISL identifiers only.')
+    if len(raw_ids) != len(set(raw_ids)):
+        raise ValueError('Duplicate accession in curated list.')
+    wanted = set(raw_ids)
+    with nextclade.open(encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle, delimiter='\t')
+        required = {'seqName', 'clade', 'aaSubstitutions', 'unknownAaRanges',
+                    'aaDeletions', 'aaInsertions', 'qc.overallStatus', 'errors'}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f'Missing Nextclade columns: {sorted(missing)}')
+        selected = []
+        seen = set()
+        for row in reader:
+            matches = set(re.findall(r'EPI_ISL_\d+', row['seqName'])) & wanted
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise ValueError('Multiple curated identifiers in one sequence header.')
+            accession = matches.pop()
+            if accession in seen:
+                raise ValueError(f'Duplicate Nextclade record: {accession}')
+            seen.add(accession)
+            if 'A/Tunisia/' not in row['seqName'] or row['clade'] != 'K':
+                raise ValueError(f'Curated record is not Tunisian subclade K: {accession}')
+            if row['qc.overallStatus'] != 'good' or row['errors']:
+                raise ValueError(f'Nextclade quality requires review: {accession}')
+            if any(row[field] for field in ['unknownAaRanges', 'aaDeletions', 'aaInsertions']):
+                raise ValueError(f'Unknown residues or amino-acid indels require review: {accession}')
+            mutations = set(filter(None, row['aaSubstitutions'].split(',')))
+            for mutation in mutations:
+                parse_mutation(mutation)
+            selected.append((accession, row['seqName'], mutations))
+    if wanted != seen:
+        raise ValueError(f'Curated accessions absent from TSV: {sorted(wanted-seen)}')
+    n = len(selected)
+    if n < 2:
+        raise ValueError('At least two sequences are required.')
+    counts = collections.Counter(m for _, _, mutations in selected for m in mutations)
+    mutations = sorted(counts, key=lambda m: (REGIONS[parse_mutation(m)[0]], parse_mutation(m)[1], m))
+    outdir.mkdir(parents=True, exist_ok=True)
+    def write_csv(name, header, records):
+        with (outdir/name).open('w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            writer.writerows(records)
+    header = ['Mutation_full', 'Mutation', 'Region', 'Position', 'Count',
+              'Denominator', 'Frequency_percent', 'Main_substitution']
+    records = [[m, m.split(':')[1], *parse_mutation(m), counts[m], n,
+                round(100*counts[m]/n, 6), 'Yes' if counts[m] >= n-1 else 'No'] for m in mutations]
+    write_csv('HA_Tunisia_mutation_counts.csv', header, records)
+    write_csv('HA_Tunisia_main_mutations.csv', header, [r for r in records if r[-1] == 'Yes'])
+    write_csv('HA_Tunisia_mutation_heatmap_matrix.csv', ['Accession', 'Sequence']+mutations,
+              [[a, name]+[int(m in muts) for m in mutations] for a, name, muts in sorted(selected)])
+    summary = {'sequences': n, 'distinct_substitutions': len(counts), 'main_threshold_count': n-1,
+               'main_substitutions': sum(c >= n-1 for c in counts.values()),
+               'reference': 'The reference and dataset version must be documented from the original Nextclade dataset.',
+               'input_sha256': hashlib.sha256(nextclade.read_bytes()).hexdigest(),
+               'curated_accessions_sha256': hashlib.sha256(accessions.read_bytes()).hexdigest()}
+    (outdir/'extraction_summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+    print(json.dumps(summary, indent=2))
 
-
-def find_column(df, candidates):
-    for cand in candidates:
-        for col in df.columns:
-            if col.lower() == cand.lower():
-                return col
-    for cand in candidates:
-        for col in df.columns:
-            if cand.lower() in col.lower():
-                return col
-    return None
-
-
-def parse_ha_mutations(value):
-    if pd.isna(value):
-        return []
-
-    text = str(value).strip()
-    if text in ["", "nan", "None"]:
-        return []
-
-    parts = re.split(r"[,; ]+", text)
-    mutations = []
-
-    for part in parts:
-        part = part.strip()
-        if part.startswith(("SigPep:", "HA1:", "HA2:")):
-            mutations.append(part)
-
-    return mutations
-
-
-def clean_mutation(mut):
-    return (
-        str(mut)
-        .replace("SigPep:", "")
-        .replace("HA1:", "")
-        .replace("HA2:", "")
-    )
-
-
-def mutation_region(mut):
-    if str(mut).startswith("SigPep:"):
-        return "SP"
-    if str(mut).startswith("HA1:"):
-        return "HA1"
-    if str(mut).startswith("HA2:"):
-        return "HA2"
-    return "Unknown"
-
-
-def mutation_position(mut):
-    match = re.search(r"(\d+)", str(mut))
-    if match:
-        return int(match.group(1))
-    return 9999
-
-
-def short_sequence_name(seq):
-    seq = str(seq)
-
-    parts = seq.split("|")
-    for part in parts:
-        if "A/Tunisia/" in part:
-            seq = part
-            break
-
-    seq = seq.replace("HA|", "")
-    seq = seq.split("|")[0]
-    return seq
-
-
-def main():
-    if not os.path.exists(NEXTCLADE_FILE):
-        raise FileNotFoundError(
-            f"Input file not found: {NEXTCLADE_FILE}\n"
-            "Please run 01_run_nextclade_HA.sh first or place the Nextclade TSV in results/."
-        )
-
-    df = pd.read_csv(NEXTCLADE_FILE, sep="\t", low_memory=False)
-
-    seq_col = find_column(df, ["seqName", "sequence", "strain"])
-    aa_col = find_column(
-        df,
-        [
-            "aaSubstitutions",
-            "substitutions",
-            "privateAaMutations.substitutions",
-        ],
-    )
-
-    if seq_col is None:
-        raise ValueError("Could not identify sequence-name column in Nextclade TSV.")
-
-    if aa_col is None:
-        raise ValueError("Could not identify amino-acid substitution column in Nextclade TSV.")
-
-    tun = df[df[seq_col].astype(str).str.contains("A/Tunisia/", regex=False)].copy()
-
-    if len(tun) == 0:
-        raise ValueError("No Tunisian sequences detected in Nextclade output.")
-
-    tun["Sequence_short"] = tun[seq_col].apply(short_sequence_name)
-    tun["HA_mutations_full"] = tun[aa_col].apply(parse_ha_mutations)
-
-    all_mutations = sorted(
-        set(m for muts in tun["HA_mutations_full"] for m in muts),
-        key=lambda x: (mutation_region(x), mutation_position(x), x),
-    )
-
-    # Mutation count table
-    rows = []
-    for mut in all_mutations:
-        count = tun["HA_mutations_full"].apply(lambda x: mut in x).sum()
-        rows.append(
-            {
-                "Mutation_full": mut,
-                "Mutation": clean_mutation(mut),
-                "Region": mutation_region(mut),
-                "Position": mutation_position(mut),
-                "Count": int(count),
-                "Frequency_percent": 100 * count / len(tun),
-            }
-        )
-
-    counts = pd.DataFrame(rows)
-    counts = counts.sort_values(["Count", "Region", "Position"], ascending=[False, True, True])
-    counts.to_csv(OUT_COUNTS, index=False)
-
-    # Presence/absence matrix
-    matrix = pd.DataFrame(index=tun["Sequence_short"])
-    for mut in all_mutations:
-        matrix[clean_mutation(mut)] = tun["HA_mutations_full"].apply(lambda x: int(mut in x)).values
-
-    matrix.to_csv(OUT_MATRIX)
-
-    # Main mutations, threshold count >= 4
-    main = counts[counts["Count"] >= 4].copy()
-    main.to_csv(OUT_MAIN, index=False)
-
-    print("Tunisian sequences:", len(tun))
-    print("Total HA substitutions:", len(counts))
-    print("Main HA substitutions with count >= 4:", len(main))
-    print("Created:")
-    print(OUT_COUNTS)
-    print(OUT_MATRIX)
-    print(OUT_MAIN)
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--nextclade', type=Path, required=True)
+    parser.add_argument('--accessions', type=Path, required=True)
+    parser.add_argument('--outdir', type=Path, default=Path('results'))
+    args = parser.parse_args()
+    run(args.nextclade, args.accessions, args.outdir)
