@@ -1,8 +1,10 @@
-# Tunisian A/H3N2 variant K HA analysis
+# Tunisian influenza A(H3N2) subclade K HA analysis
 
-This repository contains custom scripts used to analyze Tunisian A/H3N2 variant K haemagglutinin (HA) sequences collected during the 2025/2026 influenza season and to compare them with contemporaneous global HA sequences.
+This repository accompanies the genetic characterization of Tunisian influenza A(H3N2) viruses during the 2025/2026 season, with a focus on subclade K.
 
-The scripts were used for:
+The repository is being updated to reflect the revised manuscript. Existing scripts and supplementary tables correspond to an earlier analysis and should not be used to reproduce the revised results until this update is complete.
+
+The earlier analysis included:
 
 - HA sequence processing and Nextclade analysis
 - extraction of HA amino-acid substitutions
