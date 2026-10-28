@@ -1,167 +1,82 @@
 #!/usr/bin/env python3
+"""Export supplementary HA substitution tables from corrected script 06.
 
+Uses only the Python standard library. This script generates the substitution
+table (provisionally S4) and its main-substitution subset. It does not generate
+laboratory surveillance, GISAID metadata, closest-neighbor or regional tables.
+Final manuscript table numbering must be checked before submission.
 """
-Generate supplementary tables for the Tunisian A/H3N2 variant K HA analysis.
-
-Outputs:
-    supplementary_tables/Supplementary_Table_S1_complete_HA_substitutions.csv
-    supplementary_tables/Supplementary_Table_S2_closest_international_HA_neighbors.csv
-    supplementary_tables/Supplementary_Table_S3_Tunisian_HA_sequence_metadata.csv
-    supplementary_tables/Supplementary_Tables_S1_S2_S3.xlsx
-"""
-
-import os
+import argparse
+import csv
+import math
 import re
-import pandas as pd
 from pathlib import Path
 
-
-OUTDIR = Path("supplementary_tables")
-OUTDIR.mkdir(parents=True, exist_ok=True)
-
-S1_OUT = OUTDIR / "Supplementary_Table_S1_complete_HA_substitutions.csv"
-S2_OUT = OUTDIR / "Supplementary_Table_S2_closest_international_HA_neighbors.csv"
-S3_OUT = OUTDIR / "Supplementary_Table_S3_Tunisian_HA_sequence_metadata.csv"
-XLSX_OUT = OUTDIR / "Supplementary_Tables_S1_S2_S3.xlsx"
-
-S1_INPUT = "results/HA_Tunisia_mutation_counts.csv"
-S2_INPUT = "results/HA_Tunisia_closest_international_neighbors.csv"
-S3_INPUT = "results/nextclade_HA_Tunisia_plus_global.tsv"
-
-
-def get_position(mut):
-    match = re.search(r"(\d+)", str(mut))
-    return int(match.group(1)) if match else 9999
-
-
-def short_sequence_name(seq):
-    seq = str(seq)
-    parts = seq.split("|")
-
-    for part in parts:
-        if "A/Tunisia/" in part:
-            return part
-
-    return seq.split()[0]
-
-
-def find_column(df, candidates):
-    for cand in candidates:
-        for col in df.columns:
-            if col.lower() == cand.lower():
-                return col
-    for cand in candidates:
-        for col in df.columns:
-            if cand.lower() in col.lower():
-                return col
-    return None
-
-
-def make_s1():
-    if not os.path.exists(S1_INPUT):
-        raise FileNotFoundError(S1_INPUT)
-
-    df = pd.read_csv(S1_INPUT)
-
-    required = ["Mutation", "Position", "Count", "Frequency_percent", "Region"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns for S1: {missing}")
-
-    # Add epitope column if absent
-    if "Epitope" not in df.columns:
-        df["Epitope"] = "Not assigned"
-
-    s1 = df[["Mutation", "Position", "Count", "Frequency_percent", "Region", "Epitope"]].copy()
-    s1 = s1.rename(columns={"Region": "HA_region"})
-    s1 = s1.sort_values(["Position", "Mutation"])
-
-    s1.to_csv(S1_OUT, index=False)
-    return s1
-
-
-def make_s2():
-    if not os.path.exists(S2_INPUT):
-        raise FileNotFoundError(S2_INPUT)
-
-    df = pd.read_csv(S2_INPUT)
-
-    expected = [
-        "Tunisian_sequence",
-        "Closest_international_HA_neighbor",
-        "Neighbor_country",
-        "Neighbor_region",
-        "Neighbor_collection_date",
-        "Nucleotide_distance",
-        "Compared_positions",
-    ]
-
-    existing = [c for c in expected if c in df.columns]
-    s2 = df[existing].copy()
-
-    s2 = s2.sort_values(
-        ["Nucleotide_distance", "Neighbor_country", "Tunisian_sequence"],
-        na_position="last"
-    )
-
-    s2.to_csv(S2_OUT, index=False)
-    return s2
-
-
-def make_s3():
-    if not os.path.exists(S3_INPUT):
-        raise FileNotFoundError(S3_INPUT)
-
-    df = pd.read_csv(S3_INPUT, sep="\t", low_memory=False)
-
-    seq_col = find_column(df, ["seqName", "sequence", "strain"])
-    clade_col = find_column(df, ["clade"])
-    subclade_col = find_column(df, ["proposedSubclade", "subclade"])
-
-    if seq_col is None:
-        raise ValueError("Could not identify sequence-name column for S3.")
-
-    tun = df[df[seq_col].astype(str).str.contains("A/Tunisia/", regex=False)].copy()
-
-    rows = []
-    for _, r in tun.iterrows():
-        seq = str(r[seq_col])
-        rows.append({
-            "Sequence_name": short_sequence_name(seq),
-            "Country": "Tunisia",
-            "Segment": "HA",
-            "Clade": r[clade_col] if clade_col else "",
-            "Subclade": r[subclade_col] if subclade_col else "",
-        })
-
-    s3 = pd.DataFrame(rows).drop_duplicates()
-    s3 = s3.sort_values("Sequence_name")
-
-    s3.to_csv(S3_OUT, index=False)
-    return s3
-
-
 def main():
-    s1 = make_s1()
-    s2 = make_s2()
-    s3 = make_s3()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', type=Path, default=Path('results/HA_Tunisia_antigenic_annotation.csv'))
+    parser.add_argument('--outdir', type=Path, default=Path('supplementary_tables'))
+    args = parser.parse_args()
+    columns = ['Mutation_full', 'Region', 'Position', 'Count', 'Denominator',
+               'Frequency_percent', 'Main_substitution', 'Antigenic_site',
+               'Site_assignment_category', 'Annotation_source_DOI']
+    with args.input.open(encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle)
+        missing = set(columns)-set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f'Missing annotation columns: {sorted(missing)}')
+        rows = [{key: row[key] for key in columns} for row in reader]
+    seen, denominators = set(), set()
+    order = {'SigPep': 0, 'HA1': 1, 'HA2': 2}
+    for row in rows:
+        label = row['Mutation_full']
+        match = re.fullmatch(r'(SigPep|HA1|HA2):[A-Z](\d+)[A-Z]', label)
+        if not match or label in seen:
+            raise ValueError(f'Invalid or duplicate mutation: {label}')
+        seen.add(label)
+        n, count, pos = int(row['Denominator']), int(row['Count']), int(row['Position'])
+        if row['Region'] != match[1] or pos != int(match[2]):
+            raise ValueError(f'Inconsistent coordinates: {label}')
+        if n < 2 or not 1 <= count <= n:
+            raise ValueError(f'Invalid count: {label}')
+        if not math.isclose(float(row['Frequency_percent']), 100*count/n, abs_tol=1e-5):
+            raise ValueError(f'Invalid frequency: {label}')
+        expected = 'Yes' if count >= n-1 else 'No'
+        if row['Main_substitution'] != expected:
+            raise ValueError(f'Invalid main-substitution flag: {label}')
+        denominators.add(n)
+    if not rows or len(denominators) != 1:
+        raise ValueError('A nonempty annotation table with a common denominator is required.')
+    n = denominators.pop()
+    rows.sort(key=lambda r: (order[r['Region']], int(r['Position']), r['Mutation_full']))
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    for filename, subset in [
+        ('Supplementary_Table_S4_HA_substitutions.csv', rows),
+        ('Main_HA_substitutions.csv', [r for r in rows if r['Main_substitution']=='Yes']),
+    ]:
+        with (args.outdir/filename).open('w', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(subset)
+        print(f'{filename}: {len(subset)} substitutions')
+    notes = f'''# HA substitution table notes
 
-    with pd.ExcelWriter(XLSX_OUT, engine="openpyxl") as writer:
-        s1.to_excel(writer, sheet_name="Table S1 HA substitutions", index=False)
-        s2.to_excel(writer, sheet_name="Table S2 closest neighbors", index=False)
-        s3.to_excel(writer, sheet_name="Table S3 metadata", index=False)
+Denominator: {n} curated Tunisian subclade K sequences.
+Main substitution threshold: at least {n-1}/{n} sequences.
+The complete table includes all observed substitutions, including rare changes.
+Frequencies describe differences relative to the reference used by Nextclade.
+Positions use the separate signal-peptide, HA1 and HA2 coordinates in the export.
+HA1 site annotations follow Table 3 of Lees et al. (2010), DOI
+10.1093/bioinformatics/btq160. Previously identified residues and proposed
+additional assignments are distinguished. These annotations do not demonstrate
+altered antigenicity. The HA1 A-E scheme is not applied to signal peptide or HA2.
 
-    print("Created supplementary tables:")
-    print(S1_OUT)
-    print(S2_OUT)
-    print(S3_OUT)
-    print(XLSX_OUT)
-    print()
-    print("Rows:")
-    print("S1:", len(s1))
-    print("S2:", len(s2))
-    print("S3:", len(s3))
+S4 is a provisional label consistent with the current working manuscript.
+Laboratory surveillance and sequence metadata tables require separate sources
+and are not generated by this script. No regional or closest-neighbor results
+are generated.
+'''
+    (args.outdir/'README_HA_substitution_tables.md').write_text(notes)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
