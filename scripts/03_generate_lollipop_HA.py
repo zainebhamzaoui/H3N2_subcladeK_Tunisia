@@ -1,180 +1,93 @@
 #!/usr/bin/env python3
+"""Plot HA substitutions from the corrected script 02 count table.
 
+Requires matplotlib. By default, shows all observed substitutions with a dashed
+threshold at (N-1)/N. Use --main-only to show only main substitutions. Region
+labels and positions are preserved; no antigenic effects are inferred.
 """
-Generate lollipop plot of main HA amino-acid substitutions.
-
-Input:
-    results/HA_Tunisia_main_mutations_min4.csv
-
-Outputs:
-    results/Figure_HA_lollipop_main_substitutions.png
-    results/Figure_HA_lollipop_main_substitutions.pdf
-"""
-
-import os
+import argparse
+import csv
+import math
 import re
-import pandas as pd
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
-INPUT = "results/HA_Tunisia_main_mutations_min4.csv"
+ORDER = {'SigPep': 0, 'HA1': 1, 'HA2': 2}
+COLORS = {'SigPep': '#777777', 'HA1': '#23689B', 'HA2': '#B35D24'}
 
-OUT_PNG = "results/Figure_HA_lollipop_main_substitutions.png"
-OUT_PDF = "results/Figure_HA_lollipop_main_substitutions.pdf"
-
-os.makedirs("results", exist_ok=True)
-
-
-def get_position(mut):
-    m = re.search(r"(\d+)", str(mut))
-    return int(m.group(1)) if m else 9999
-
-
-def plot_position(row):
-    region = str(row["Region"])
-    pos = int(row["Position"])
-
-    if region == "SP":
-        return pos
-    if region == "HA1":
-        return 16 + pos
-    if region == "HA2":
-        return 344 + pos
-
-    return pos
-
-
-def assign_epitope(mut, region):
-    pos = get_position(mut)
-
-    if region != "HA1":
-        return "Other"
-
-    epitope_A = set(list(range(121, 146)) + list(range(153, 159)) + list(range(171, 174)))
-    epitope_B = set(list(range(155, 161)) + list(range(186, 199)))
-    epitope_C = set(list(range(44, 58)) + list(range(276, 281)))
-    epitope_D = set(list(range(96, 103)) + list(range(201, 225)))
-    epitope_E = set(list(range(62, 83)) + list(range(260, 270)))
-
-    if pos in epitope_A:
-        return "Epitope A"
-    if pos in epitope_B:
-        return "Epitope B"
-    if pos in epitope_C:
-        return "Epitope C"
-    if pos in epitope_D:
-        return "Epitope D"
-    if pos in epitope_E:
-        return "Epitope E"
-
-    return "Other"
-
+def load_counts(path):
+    with path.open(encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle)
+        required = {'Mutation_full', 'Region', 'Position', 'Count', 'Denominator', 'Frequency_percent'}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError('Use HA_Tunisia_mutation_counts.csv from corrected script 02.')
+        rows = list(reader)
+    if not rows:
+        raise ValueError('The input table is empty.')
+    seen, denominators = set(), set()
+    for row in rows:
+        label = row['Mutation_full']
+        match = re.fullmatch(r'(SigPep|HA1|HA2):([A-Z])(\d+)([A-Z])', label)
+        if not match or label in seen:
+            raise ValueError(f'Invalid or duplicate mutation: {label}')
+        seen.add(label)
+        row['Count'] = int(row['Count'])
+        row['Denominator'] = int(row['Denominator'])
+        row['Position'] = int(row['Position'])
+        n, count = row['Denominator'], row['Count']
+        if n < 2 or not 1 <= count <= n:
+            raise ValueError(f'Invalid count or denominator: {label}')
+        if row['Region'] != match[1] or row['Position'] != int(match[3]):
+            raise ValueError(f'Region or position disagrees with mutation label: {label}')
+        frequency = 100 * count / n
+        if not math.isclose(float(row['Frequency_percent']), frequency, abs_tol=1e-5):
+            raise ValueError(f'Frequency disagrees with count: {label}')
+        row['frequency'] = frequency
+        denominators.add(n)
+    if len(denominators) != 1:
+        raise ValueError('This plot requires a common denominator for all positions.')
+    return sorted(rows, key=lambda r: (ORDER[r['Region']], r['Position'], r['Mutation_full'])), denominators.pop()
 
 def main():
-    if not os.path.exists(INPUT):
-        raise FileNotFoundError(
-            f"Input file not found: {INPUT}. "
-            "Please run 02_extract_HA_substitutions.py first."
-        )
-
-    df = pd.read_csv(INPUT)
-
-    required = ["Mutation", "Region", "Position", "Count"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns in input file: {missing}")
-
-    df["Plot_position"] = df.apply(plot_position, axis=1)
-    df["Epitope"] = df.apply(lambda r: assign_epitope(r["Mutation"], r["Region"]), axis=1)
-
-    df = df.sort_values("Plot_position")
-
-    epitope_colors = {
-        "Epitope A": "#1f77b4",
-        "Epitope B": "#ff7f0e",
-        "Epitope C": "#2ca02c",
-        "Epitope D": "#d62728",
-        "Epitope E": "#9467bd",
-        "Other": "#bdbdbd",
-    }
-
-    plt.rcParams.update({
-        "font.family": "DejaVu Sans",
-        "font.size": 9,
-        "axes.titlesize": 12,
-        "axes.labelsize": 10,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-    })
-
-    fig, ax = plt.subplots(figsize=(12.5, 4.8), dpi=300)
-
-    # Background regions
-    ax.axvspan(0, 16, color="#eaf4fb", alpha=0.8)
-    ax.axvspan(16, 344, color="#fdeaea", alpha=0.55)
-    ax.axvspan(344, 560, color="#eaf6e9", alpha=0.8)
-
-    # Region labels
-    ymax = max(df["Count"]) + 6
-    ax.text(8, ymax - 1.0, "SP", color="#1f77b4", ha="center", va="top", fontsize=12, fontweight="bold")
-    ax.text(180, ymax - 1.0, "HA1", color="#d62728", ha="center", va="top", fontsize=12, fontweight="bold")
-    ax.text(455, ymax - 1.0, "HA2", color="#2ca02c", ha="center", va="top", fontsize=12, fontweight="bold")
-
-    # Boundaries
-    ax.axvline(16, color="0.45", linestyle="--", linewidth=0.8)
-    ax.axvline(344, color="0.45", linestyle="--", linewidth=0.8)
-
-    # Lollipop
-    for _, r in df.iterrows():
-        x = r["Plot_position"]
-        y = r["Count"]
-        color = epitope_colors.get(r["Epitope"], "#bdbdbd")
-
-        ax.vlines(x, 0, y, color="#d62728" if r["Region"] == "HA1" else color, linewidth=1.4, alpha=0.9)
-        ax.scatter(x, y, s=80, color=color, edgecolor="black", linewidth=0.5, zorder=3)
-
-        label = str(r["Mutation"])
-        ax.text(x, y + 0.7, label, ha="center", va="bottom", rotation=90, fontsize=7.5)
-
-    ax.set_title(
-        "Main HA amino-acid substitutions in Tunisian A/H3N2 variant K sequences",
-        fontweight="bold",
-        pad=12
-    )
-    ax.set_xlabel("Position along HA protein")
-    ax.set_ylabel("Number of Tunisian sequences")
-
-    ax.set_xlim(0, 560)
-    ax.set_ylim(0, ymax)
-
-    ax.grid(axis="y", linestyle="--", alpha=0.25)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    legend_handles = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=epitope_colors[e],
-               markeredgecolor="black", markersize=7, label=e.replace("Epitope ", "Epitope "))
-        for e in ["Epitope A", "Epitope B", "Epitope C", "Epitope D", "Epitope E", "Other"]
-    ]
-
-    ax.legend(
-        handles=legend_handles,
-        ncol=6,
-        frameon=False,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.18)
-    )
-
-    plt.tight_layout()
-
-    fig.savefig(OUT_PNG, dpi=300, bbox_inches="tight")
-    fig.savefig(OUT_PDF, bbox_inches="tight")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', type=Path, default=Path('results/HA_Tunisia_mutation_counts.csv'))
+    parser.add_argument('--out-prefix', type=Path, default=Path('results/Figure_HA_lollipop'))
+    parser.add_argument('--main-only', action='store_true')
+    args = parser.parse_args()
+    rows, n = load_counts(args.input)
+    main_count = sum(r['Count'] >= n-1 for r in rows)
+    if args.main_only:
+        rows = [r for r in rows if r['Count'] >= n-1]
+    if not rows:
+        raise ValueError('No substitutions meet the selected threshold.')
+    plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 9, 'svg.fonttype': 'none'})
+    fig, ax = plt.subplots(figsize=(8, max(5, .245*len(rows)+1.4)))
+    for i, row in enumerate(rows):
+        value = row['frequency']
+        color = COLORS[row['Region']]
+        ax.hlines(i, 0, value, color=color, linewidth=1.4)
+        ax.plot(value, i, 'o', color=color, markersize=5)
+        ax.text(value+1.5, i, f"{row['Count']}/{n}", va='center', fontsize=8)
+    ax.set_yticks(range(len(rows)), [r['Mutation_full'] for r in rows])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 119)
+    ax.set_xticks([0, 25, 50, 75, 100])
+    ax.set_xlabel('Frequency among Tunisian subclade K sequences (%)')
+    ax.axvline(100*(n-1)/n, color='#555555', linestyle='--', linewidth=.8,
+               label=f'Main substitution threshold ({n-1}/{n})')
+    for side in ['top', 'right']:
+        ax.spines[side].set_visible(False)
+    ax.legend(loc='lower right', frameon=False, fontsize=8)
+    fig.tight_layout()
+    args.out_prefix.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ['png', 'pdf', 'svg']:
+        destination = Path(str(args.out_prefix)+'.'+suffix)
+        fig.savefig(destination, dpi=300, facecolor='white')
+        print(destination)
     plt.close(fig)
+    print(f'N={n}; main substitutions={main_count}; displayed={len(rows)}')
 
-    print("Created:")
-    print(OUT_PNG)
-    print(OUT_PDF)
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
